@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang=en>
+<head>
+<title>Webcam in the browser - dots</title>
+<meta http-equiv='Content-Type' content='text/html; charset=utf-8' />
+<meta name='googlebot' content='noarchive' />
+<meta name='robots'    content='noarchive, nosnippet' />
+<meta name='description' content='Webcam manipulation in the browser' />
+<style>
+body, html { height: 100%; }
+body { overflow: hidden; margin: 0px; padding: 0px; background-color: #000; color: #999; }
+canvas { position:absolute; left:0px; top:0px; transform: scale(-1, 1); cursor: none; }
+pre { position:absolute; left:10px; bottom:10px; margin:0px; background-color:rgba(0,0,0,0.5); color:white; font-family: Verdana; font-size: 12px; }
+</style>
+</head>
+<body>
+
+<video id='webcam' autoplay muted width='300' height='150' style='display:none;'></video>
+<canvas></canvas>
+<pre></pre>
+
+<script type='text/javascript'>
+
+'use strict'
+
+var frameData
+
+
+function View(selector) {
+  var last
+  var context = document.querySelector(selector).getContext('2d')
+  this.reset = function() {
+    context.canvas.width = document.documentElement.clientWidth
+    context.canvas.height = document.documentElement.clientHeight
+    this.rect('#000')
+  }
+  this.color = function(o) {
+    return 'hsl(' + o.hue + ',' + o.saturation + '%,' + o.level + '%)'
+  }
+  this.stroke = function(f, t) {
+    context.strokeStyle = this.color(t)
+    context.beginPath()
+    context.moveTo(context.canvas.width * f.x, context.canvas.height * f.y)
+    context.lineTo(context.canvas.width * t.x, context.canvas.height * t.y)
+    context.stroke()
+  }
+  this.circle = function(o) {
+    if (last) this.stroke(last, o)
+    context.fillStyle = this.color(o)
+    context.beginPath()
+    context.arc(context.canvas.width * o.x, context.canvas.height * o.y, o.r, 0, 2*Math.PI)
+    context.fill()
+    last = o
+  }
+  this.rect = function(color) {
+    context.fillStyle = color
+    context.fillRect(0, 0, context.canvas.width, context.canvas.height)
+  }
+}
+
+function createError(message) {
+  return function() {
+    document.body.innerHTML = message;
+    throw new Error(message)
+  }
+}
+
+function calcDiffMap(data1, data2, target) {
+  for (var i = 0; i < data1.length; i += 4) {
+    var diff = (data1[i] + data1[i+1] + data1[i+2]) - (data2[i] + data2[i+1] + data2[i+2])
+    target[i] = target[i+1] = target[i+2] = Math.abs(diff) > 3*3 ? 1 : 0
+    target[i+3] = 255
+  }
+}
+
+function drawCircleFromDiff(diffContext, view) {
+  var w = diffContext.canvas.width
+  var h = diffContext.canvas.height
+  var best, parts = 20
+  frameData.push('    Screen is divided to ' + parts + 'x' + parts + ' sections. Counting changed pixels per section...')
+  for (var c = 0; c < parts; c++) {
+    for (var r = 0; r < parts; r++) {
+      var sum = 0
+      var partData = diffContext.getImageData(c/parts*w, r/parts*h, w/parts, h/parts).data
+      for (var i = 0; i < partData.length; i += 4) sum += partData[i]
+      var average = sum / (partData.length / 4)
+      if (!best || average > best.average) best = { average: average, c: c, r: r, sum: sum }
+    }
+  }
+  if (!best.average) return
+  frameData.push('    Strongest movement is ' + best.sum + 'px at section ' + best.c + 'x' + best.r + '.')
+  var radius = Math.floor(best.average / 10 * 255)
+  frameData.push('Drawing circle of radius ' + radius + 'px at section ' + best.c + 'x' + best.r + '.')
+  view.circle({
+    x: (best.c + Math.random())/parts,
+    y: (best.r + Math.random())/parts,
+    r: radius,
+    hue: 0,
+    saturation: 100,
+    level: 70 + 20 * Math.sin(Date.now()/1000/30 * 2 * Math.PI)
+  })
+  return true
+}
+
+function getCanvasImageData(context) {
+  return context.getImageData(0, 0, context.canvas.width, context.canvas.height).data
+}
+
+function setAudio(stream) {
+  var audioContext = new AudioContext()
+  var scriptProcessor = audioContext.createScriptProcessor(512)
+  scriptProcessor.onaudioprocess = function(event) {
+    var buffer = event.inputBuffer.getChannelData(0)
+    var sum = [].reduce.call(buffer, function(s, c) { return s + c * c }, 0)
+    var rms =  Math.sqrt(sum / buffer.length)
+    this.volume = Math.max(rms, this.volume * 0.95)
+  }
+  scriptProcessor.clipping = false
+  scriptProcessor.volume = 0
+  scriptProcessor.connect(audioContext.destination)
+  audioContext.createMediaStreamSource(stream).connect(scriptProcessor)
+  return scriptProcessor
+}
+
+////////////////////////////////////////////////////////////////////////////////
+
+var pre = document.querySelector('pre')
+var videoEl = document.querySelector('video#webcam')
+var webcamContext = document.createElement('canvas').getContext('2d')
+var diffContext = document.createElement('canvas').getContext('2d')
+var view = new View('canvas')
+
+var diffImage = diffContext.createImageData(videoEl.width, videoEl.height)
+var prevImageData, audio, lastVolume
+
+var options = ['notext', 'nomic'].reduce(function(o, tag) {
+  o[tag] = window.location.search.indexOf(tag) !== -1
+  return o
+}, {})
+
+function frame() {
+  if (!options.nomic) {
+    var volume = parseInt(100 * audio.volume)
+    if (volume - lastVolume > 24) view.reset()
+    lastVolume = volume
+  }
+
+  frameData = []
+  if (prevImageData) {
+    frameData.push('Fetching image from camera...')
+    webcamContext.drawImage(videoEl, 0, 0, videoEl.width, videoEl.height)
+    frameData.push('Calculating difference from previous image...')
+    calcDiffMap(getCanvasImageData(webcamContext), prevImageData, diffImage.data)
+    diffContext.putImageData(diffImage, 0, 0)
+    view.rect('rgba(0, 0, 0, 0.01)')
+    frameData.push('Calculating next circle to draw...')
+    var drew = drawCircleFromDiff(diffContext, view)
+    if (drew && !options.notext) pre.innerHTML = frameData.join('\n')
+  }
+  prevImageData = getCanvasImageData(webcamContext)
+
+}
+
+////////////////////////////////////////////////////////////////////////////////
+
+if (!navigator.webkitGetUserMedia) createError('no navigator.webkitGetUserMedia!')()
+
+navigator.webkitGetUserMedia({ video: true, audio: true }, function(stream) {
+  audio = setAudio(stream)
+  videoEl.src = window.URL.createObjectURL(stream)
+  requestAnimationFrame(function frameWrapper() {
+    frame()
+    requestAnimationFrame(frameWrapper)
+  })
+}, createError('Please allow this page access to your webcam.'))
+
+window.onload = window.onresize = window.onclick = view.reset.bind(view)
+
+</script>
+
+
+</body>
+</html>
